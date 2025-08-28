@@ -114,11 +114,24 @@ def create_seasonal_patterns(train_df, test_df):
     monthly_patterns = train_df.groupby(['month', 'day_of_week']).size().reset_index(name='count')
     monthly_patterns = monthly_patterns.pivot(index='month', columns='day_of_week', values='count').fillna(0)
     
+    # Apply to train and test first
+    train_seasonal = train_df.groupby('user_session').agg({
+        'day_of_week': 'mean',
+        'hour': 'mean',
+        'month': 'mean'
+    }).reset_index()
+    
+    test_seasonal = test_df.groupby('user_session').agg({
+        'day_of_week': 'mean',
+        'hour': 'mean',
+        'month': 'mean'
+    }).reset_index()
+    
     # Create seasonal features for each session
     def get_seasonal_features(row):
-        day_of_week = int(row['day_of_week_mean'])
-        hour = int(row['hour_mean'])
-        month = int(row['month_mean'])
+        day_of_week = int(row['day_of_week'])
+        hour = int(row['hour'])
+        month = int(row['month'])
         
         # Daily pattern strength
         daily_strength = daily_patterns.iloc[day_of_week, hour] if day_of_week < len(daily_patterns) and hour < len(daily_patterns.columns) else 0
@@ -133,19 +146,6 @@ def create_seasonal_patterns(train_df, test_df):
             'is_business_hours': 1 if 9 <= hour <= 17 else 0,
             'is_night': 1 if hour >= 22 or hour <= 6 else 0
         })
-    
-    # Apply to train and test
-    train_seasonal = train_df.groupby('user_session').agg({
-        'day_of_week': 'mean',
-        'hour': 'mean',
-        'month': 'mean'
-    }).reset_index()
-    
-    test_seasonal = test_df.groupby('user_session').agg({
-        'day_of_week': 'mean',
-        'hour': 'mean',
-        'month': 'mean'
-    }).reset_index()
     
     train_seasonal_features = train_seasonal.apply(get_seasonal_features, axis=1)
     test_seasonal_features = test_seasonal.apply(get_seasonal_features, axis=1)
@@ -309,20 +309,28 @@ def create_time_series_submission(train_features, test_features, train_temporal,
     """Create submission using temporal features"""
     print("=== CREATING TIME SERIES SUBMISSION ===")
     
-    # Get training targets
+    # Get training targets (session-level)
     train_targets = train_features.groupby('user_session')['session_value'].first()
     
-    # Merge temporal features with main features
-    train_final = train_features.merge(train_temporal, on='user_session', how='left')
-    test_final = test_features.merge(test_temporal, on='user_session', how='left')
+    # Use temporal features directly (they are already session-level)
+    train_final = train_temporal.copy()
+    test_final = test_temporal.copy()
     
-    # Select temporal features
-    temporal_cols = [col for col in train_temporal.columns if col != 'user_session']
+    # Select temporal features (only numeric columns that exist in train_final)
+    available_cols = [col for col in train_temporal.columns 
+                     if col != 'user_session' and col in train_final.columns 
+                     and train_final[col].dtype in ['int64', 'float64']]
+    
+    print(f"Using {len(available_cols)} available temporal features: {available_cols[:5]}...")
+    
+    if len(available_cols) == 0:
+        print("No temporal features available, using basic features")
+        available_cols = ['event_time_min', 'event_time_max'] if 'event_time_min' in train_final.columns else []
     
     # Simple model using temporal features
     from sklearn.ensemble import RandomForestRegressor
     
-    X = train_final[temporal_cols].fillna(0)
+    X = train_final[available_cols].fillna(0)
     y = train_targets
     
     # Train model
@@ -330,7 +338,7 @@ def create_time_series_submission(train_features, test_features, train_temporal,
     model.fit(X, y)
     
     # Make predictions
-    X_test = test_final[temporal_cols].fillna(0)
+    X_test = test_final[available_cols].fillna(0)
     predictions = model.predict(X_test)
     
     # Create submission
